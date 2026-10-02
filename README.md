@@ -24,8 +24,12 @@
    - 实测证实展锐 LSC 20x25x4 矩阵的物理通道顺序为 **`[G0, B, R, G1]`**（而非传统 AOSP 的 `[R, Gr, Gb, B]`），终结了越补偿越绿的恶性循环，并构建了基于样张的闭环反求拟合算法。
 7. **TrustZone TEE (Trusty OS) RPMB 安全存储死锁原位修复**：
    - 定位 `Addr failure, 65530` 根因（512KB 虚拟 `v_rpmb.txt` 越界），通过 37 字节原位定长无损替换重定向至真实物理块设备 `/dev/mmcblk0rpmb`，攻克卡开机动画绝症。
-8. **Android 16 (Baklava) 跨代升级可行性全景评估**：
-   - 系统梳理 eBPF 网络栈、HIDL 彻底移除、32 位 Provider 生存策略与 16KB 页面演变。
+8. **全量黑匣子日志提取与毫秒级增量去噪对撞**：
+   - 构建 BROM 级只读取证管道（`uboot_log`, `ramoops`, `sysdumpdb`），开发针对时间戳漂移的增量对撞引擎与 printk 噪声净化器。
+9. **免 BROM 的 Super RAW 逻辑卷原位无感热刷方案**：
+   - 在已开机系统下通过 `dd conv=notrunc` 实现秒级切片热写入与 MD5 回环验证，配合 EROFS 标准重构引擎实现全闭环。
+10. **Android 16 (crDroid 12.12) vs Android 14 (LineageOS 21) GSI 全景对撞评估**：
+    - 针对社区最新 GSI 展开架构级评测，输出精准选型决策。
 
 ---
 
@@ -41,7 +45,10 @@ ROM-Adaptation/
 │   ├── 04_CAMERA_HAL_AND_VOLTAGE_ABI.md   # 相机 HAL 跨代移植与 Thumb 汇编原位 Patch
 │   ├── 05_CAMERA_ISP_LSC_TUNING.md        # LSC 镜头阴影校正逆向 [G,B,R,G] 与闭环拟合
 │   ├── 06_TRUSTY_TEE_RPMB_DEADLOCK.md     # Trusty OS RPMB 死锁剖析与 37 字节原位重定向
-│   └── 07_ANDROID_16_FEASIBILITY.md       # Android 16 (Baklava) 升级可行性全景评估
+│   ├── 07_ANDROID_16_FEASIBILITY.md       # Android 16 (Baklava) 升级可行性全景评估
+│   ├── 08_LOG_FORENSICS_AND_NOISE_REDUCTION.md # 黑匣子日志提取与毫秒增量去噪对撞
+│   ├── 09_FIRMWARE_IN_PLACE_INJECTION_SOP.md   # 固件原位注入、EROFS 重构与 Super 逻辑卷切片无感热刷
+│   └── 10_GSI_COMPARISON_CRDROID_A16_VS_LINEAGEOS_A14.md # crDroid A16 vs LineageOS A14 全景对撞
 └── tools/                             # 自动化工程工具链
     ├── camera/                            # 相机栈逆向与画质调优
     │   ├── patch_vdd.py                       # 模块供电电压枚举 ABI 原位修补
@@ -58,8 +65,15 @@ ROM-Adaptation/
     │   └── avb_hashtree_rebuild.py            # 0.85秒极速 Merkle 树流式重构与原位打标
     ├── brom_unbrick/                      # BROM 引导与救砖
     │   └── brom_reset_misc.py                 # 清理 /misc 分区 Recovery 循环陷阱
-    └── tee_rpmb/                          # 安全存储与 TEE
-        └── patch_rpmb_proxy.py                # 37 字节定长 RPMB 物理设备原地重定向
+    ├── tee_rpmb/                          # 安全存储与 TEE
+    │   └── patch_rpmb_proxy.py                # 37 字节定长 RPMB 物理设备原地重定向
+    ├── forensics_logs/                    # 日志提取与取证分析
+    │   ├── brom_log_session.py                # BROM 握手与全量黑匣子只读提取
+    │   ├── uboot_log_delta_diff.py            # 毫秒级时间戳 U-Boot 增量去噪对撞
+    │   └── clean_dmesg.py                     # 内核 printk / dmesg / ramoops 噪声净化器
+    └── firmware_inject/                   # 固件原位注入与重构
+        ├── repack_erofs_vendor.py             # EROFS 逻辑卷标准重构引擎
+        └── live_dd_super_slice.py             # 免 BROM 的 Super RAW 切片原位热刷工具
 ```
 
 ---
@@ -75,37 +89,29 @@ python tools/avb_security/avb_hashtree_rebuild.py \
   --patch
 ```
 
-### 2. 生成绝对防抹空的 Sparse Super 刷机镜像
+### 2. 免 BROM 的已开机 Super 切片热刷新
 ```bash
-python tools/super_builder/build_super_sparse.py \
-  super_header_16m.bin \
-  system_gsi.img \
-  super_sparse.img
+python tools/firmware_inject/live_dd_super_slice.py vendor_a_patched.img 544
 ```
 
-### 3. Windows 免 WSL 极速提取 Ext4 逻辑卷闭源驱动
+### 3. U-Boot 增量日志去噪与生命周期信号提取
 ```bash
-python tools/super_builder/ext4x.py vendor.img out_libs/ "(libcamera|libsensor|tuning|libparam)"
+python tools/forensics_logs/uboot_log_delta_diff.py uboot_log_now.bin uboot_log_base.txt
 ```
 
 ### 4. 展锐相机传感器静态供电修补
 ```bash
-# 将 OV13850R2A 的 1.0V DVDD (枚举值 13) 修正为 L27 内核合法的枚举值 9 (1.2V)
 python tools/camera/patch_vdd.py libsensor_ov13850r2a.so patched/libsensor_ov13850r2a.so 0x2c54 13 9
-```
-
-### 5. 基于实拍白墙样张闭环反求并注入 LSC 表
-```bash
-python tools/camera/make_lsc_fit.py shot_wall.jpg libparam_s5k3l8xxm3.so libparam_ov13850r2a.so 0xbfe34 0.8 reset
 ```
 
 ---
 
-## 📱 Android 12 至 16 升级路径总览
+## 📱 Android 12 至 16 升级决策速查
 
-- **Android 12 (出厂基线)**：全功能 100% 达成（触屏、音频、Wi-Fi、蓝牙、GNSS、相机出图对焦）；
-- **Android 13 / 14 (LineageOS 21 / TrebleDroid)**：**90%~99% 可用（强烈推荐主力升级路径）**，无缝复用 Android 12 Vendor，流畅度与现代生态极佳；
-- **Android 15 / 16 (Baklava)**：需要攻克 32 位 Camera Provider 兼容、AOSP HIDL 客户端移除以及 Linux 5.4 内核 eBPF / CO-RE backport 等底层鸿沟（详见 `docs/07_ANDROID_16_FEASIBILITY.md`）。
+- **日常主力使用（95% 强烈推荐）**：👉 **LineageOS 21 (Android 14 GSI)**  
+  原生继承 Android 12 Vendor，HIDL 2.4 相机服务无缝工作，5.4 内核网络栈零报错，省电稳定。
+- **极客前沿尝鲜（折腾玩机）**：👉 **crDroid 12.12 (Android 16 GSI)**  
+  基于 [Doze-off/crdroid_gsi_treble](https://github.com/Doze-off/crdroid_gsi_treble)（SDK 36, Baklava），功能极其丰富炫酷，但需面对 A16 移除 HIDL 及 32 位相机 Provider 导致的相机不可用挑战。
 
 ---
 
