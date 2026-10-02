@@ -1,0 +1,22 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Binaries / Large images
+*.img
+*.bin
+*.pac
+*.iso
+*.tar.gz
+*.zip
+*.so
+*.dll
+*.exe
+
+# Output & temp
+/out/
+/tmp/
+/shot_*.jpg
+*.npy
+*.log
